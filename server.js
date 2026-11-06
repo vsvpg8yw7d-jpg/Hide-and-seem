@@ -7,7 +7,7 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const PUB = __dirname;
-const STATIC = new Set(['index.html', 'style.css', 'app.js']); // nur diese Dateien werden ausgeliefert
+const STATIC = new Set(['index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png']); // nur diese Dateien werden ausgeliefert
 const games = new Map();
 
 const OUT_LIMIT_MS = 60 * 1000;   // so lange darf ein Verstecker draußen sein
@@ -18,6 +18,8 @@ const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
+  '.png': 'image/png',
 };
 
 const rid = () => crypto.randomBytes(8).toString('hex');
@@ -34,7 +36,7 @@ function newCode() {
 }
 
 const newPlayer = (id, name) => ({
-  id, name: cleanName(name), role: null, pos: null, posAt: 0,
+  id, name: cleanName(name), role: null, startRole: null, pos: null, posAt: 0,
   found: false, outSince: 0, exposedUntil: 0, expPending: false,
 });
 
@@ -252,7 +254,7 @@ function act(g, p, b) {
       g.event = null;
       g.final = null;
       g.endReason = null;
-      for (const x of list) Object.assign(x, { pos: null, posAt: 0, found: false, outSince: 0, exposedUntil: 0, expPending: false });
+      for (const x of list) Object.assign(x, { startRole: x.role, pos: null, posAt: 0, found: false, outSince: 0, exposedUntil: 0, expPending: false });
       break;
     }
     case 'pos': {
@@ -283,10 +285,11 @@ function act(g, p, b) {
       if (!t || t.role !== 'hider') throw new Error('Diese Person ist kein Verstecker.');
       if (t.found) return false;
       if (p.role !== 'seeker' && p.id !== t.id) throw new Error('Nur Sucher können das melden.');
-      t.found = true;
+      t.found = true;      // gefangen
+      t.role = 'seeker';   // Gefangene werden Sucher und bekommen alle Rechte und Pings der Sucher
       t.exposedUntil = 0;
       t.outSince = 0;
-      addEvent(g, 'found', `${t.name} wurde gefunden!`);
+      addEvent(g, 'found', `${t.name} wurde gefangen und ist jetzt Sucher!`);
       if (unfound(g).length === 0) {
         finish(g, 'allfound');
         return false;
@@ -307,7 +310,7 @@ function act(g, p, b) {
       g.final = null;
       g.endReason = null;
       g.startAt = g.endAt = g.nextPing = 0;
-      for (const x of g.players.values()) Object.assign(x, { pos: null, posAt: 0, found: false, outSince: 0, exposedUntil: 0, expPending: false });
+      for (const x of g.players.values()) Object.assign(x, { role: x.startRole || x.role, pos: null, posAt: 0, found: false, outSince: 0, exposedUntil: 0, expPending: false });
       break;
     case 'leave': {
       g.players.delete(p.id);

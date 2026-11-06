@@ -63,7 +63,11 @@
   let newsT;
   function showNews(text, ms) {
     const n = $('#news');
-    n.textContent = text; n.hidden = false;
+    n.innerHTML = '<div class="news-label">Eilmeldung</div><div class="news-track"><span class="news-text"></span></div>';
+    const t = n.querySelector('.news-text');
+    t.textContent = text;
+    t.style.animationDuration = ms + 'ms'; // Lauftext: läuft in der Restzeit der 10 Sekunden einmal durch
+    n.hidden = false;
     clearTimeout(newsT);
     newsT = setTimeout(() => (n.hidden = true), ms);
   }
@@ -155,27 +159,26 @@
     return c;
   }
 
-  // Warnung außerhalb des Spielfelds: rotes Blinken + Text; Verstecker werden nach 1 Min. live sichtbar
+  // Warnung außerhalb des Spielfelds: nur für Verstecker und erst nach dem Countdown.
+  // Nach 1 Minute draußen werden sie 3 Minuten lang live für die Sucher sichtbar.
   function updateOutWarn() {
     const warn = $('#outWarn'), flash = $('#flash');
     const m = me();
     const r = S && ring(S.settings.area);
-    const out = !!(gameActive() && r && myPos && m && !m.found && !inside(r, myPos.lat, myPos.lng));
+    const hiderNow = !!(m && m.role === 'hider' && S.status === 'running');
+    const out = !!(hiderNow && r && myPos && !inside(r, myPos.lat, myPos.lng));
     if (out) { if (!outLocalSince) { outLocalSince = Date.now(); vibrate([300, 120, 300]); } } else outLocalSince = 0;
     flash.classList.toggle('alarm', out);
 
-    const exposedLeft = m && m.exposedUntil ? m.exposedUntil - nowS() : 0;
+    const exposedLeft = hiderNow && m.exposedUntil ? m.exposedUntil - nowS() : 0;
     let text = '';
     if (out) {
-      text = 'Du bist außerhalb des Spielfelds! Geh zurück.';
-      if (m.role === 'hider' && S.status === 'running') {
-        if (exposedLeft > 0) text = `Außerhalb! Die Sucher sehen deinen Live-Standort noch ${fmt(exposedLeft)}.`;
-        else {
-          const sec = Math.max(0, 60 - Math.floor((Date.now() - outLocalSince) / 1000));
-          text = `Du bist außerhalb des Spielfelds! In ${sec} Sek. sehen die Sucher deinen Live-Standort.`;
-        }
+      if (exposedLeft > 0) text = `Außerhalb! Die Sucher sehen deinen Live-Standort noch ${fmt(exposedLeft)}.`;
+      else {
+        const sec = Math.max(0, 60 - Math.floor((Date.now() - outLocalSince) / 1000));
+        text = `Du bist außerhalb des Spielfelds! In ${sec} Sek. sehen die Sucher deinen Live-Standort.`;
       }
-    } else if (exposedLeft > 0 && m.role === 'hider') {
+    } else if (exposedLeft > 0) {
       text = `Die Sucher sehen deinen Live-Standort noch ${fmt(exposedLeft)}.`;
     }
     warn.hidden = !text;
@@ -292,7 +295,7 @@
     for (const p of S.final) {
       pts.push([p.lat, p.lng]);
       L.marker([p.lat, p.lng], {
-        icon: L.divIcon({ className: '', html: `<div class="pingmark endmark ${p.role}"><i></i><b>${esc(p.name)}${p.found ? ' · gefunden' : ''}</b></div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
+        icon: L.divIcon({ className: '', html: `<div class="pingmark endmark ${p.role}"><i></i><b>${esc(p.name)}${p.found ? ' · gefangen' : ''}</b></div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
         interactive: false,
       }).addTo(M.endLayer);
     }
@@ -422,14 +425,14 @@
     const running = S.status === 'running';
     const group = (role, label) => {
       const items = S.players.filter((p) => p.role === role).map((p) => {
-        const canTap = running && role === 'hider' && !p.found && (meP.role === 'seeker' || p.id === meP.id);
-        const cls = ['pchip', role, p.found ? 'found' : '', foundConfirm === p.id ? 'confirm' : ''].filter(Boolean).join(' ');
+        const canTap = running && role === 'hider' && (meP.role === 'seeker' || p.id === meP.id);
+        const cls = ['pchip', role, foundConfirm === p.id ? 'confirm' : ''].filter(Boolean).join(' ');
         const name = esc(p.name) + (p.id === meP.id ? ' <small>du</small>' : '');
         if (canTap) {
           const txt = foundConfirm === p.id ? (p.id === meP.id ? 'Ich wurde gefunden? Nochmal tippen' : esc(p.name) + ' gefunden? Nochmal tippen') : name;
           return `<button class="${cls}" data-id="${p.id}">${txt}</button>`;
         }
-        const tag = p.found ? ' <small>gefunden</small>' : (S.live || []).some((l) => l.id === p.id) ? ' <small>LIVE</small>' : '';
+        const tag = p.found ? ' <small>gefangen</small>' : (S.live || []).some((l) => l.id === p.id) ? ' <small>LIVE</small>' : '';
         return `<span class="${cls}">${name}${tag}</span>`;
       }).join('');
       return `<div class="rgroup"><span class="rlabel">${label}</span>${items}</div>`;
@@ -453,8 +456,8 @@
     const m = me();
     const role = m && m.role;
     const tag = $('#roleTag');
-    if (m && m.found) { tag.textContent = 'Gefunden'; tag.className = 'roletag found'; }
-    else { tag.textContent = role === 'hider' ? 'Verstecker' : 'Sucher'; tag.className = 'roletag ' + (role === 'hider' ? 'hider' : 'seeker'); }
+    tag.textContent = role === 'hider' ? 'Verstecker' : 'Sucher';
+    tag.className = 'roletag ' + (role === 'hider' ? 'hider' : 'seeker');
     ensureMap('gameMap');
     drawArea(); drawPings(); drawLive(); drawFinal(); updateMe(); updateOutWarn(); renderRoster();
     if (M.map.dragging && !M.map.dragging.enabled()) { M.map.dragging.enable(); M.map.touchZoom.enable(); M.map.doubleClickZoom.enable(); M.el.classList.remove('drawing'); }
@@ -472,10 +475,10 @@
     const end = S.status === 'ended';
     $('#endCard').hidden = !(end && !showMapAfterEnd);
     if (end) {
-      const left = S.players.filter((p) => p.role === 'hider' && !p.found).map((p) => p.name);
+      const left = S.players.filter((p) => p.role === 'hider').map((p) => p.name);
       const T = {
         time: ['Zeit abgelaufen', left.length ? `Die Verstecker haben gewonnen. Nicht gefunden: ${left.join(', ')}.` : 'Die Verstecker haben durchgehalten.'],
-        allfound: ['Alle gefunden', 'Die Sucher haben gewonnen.'],
+        allfound: ['Alle gefangen', 'Alle Verstecker wurden gefangen. Die Sucher haben gewonnen.'],
         nohiders: ['Keine Verstecker mehr', 'Alle Verstecker haben das Spiel verlassen.'],
         host: ['Beendet vom Host', 'Der Host hat das Spiel beendet.'],
       }[S.endReason] || ['Spiel vorbei', ''];
@@ -503,9 +506,8 @@
       const np = S.nextPing - now;
       $('#pingTimer').textContent = S.nextPing < S.endAt ? fmt(np) : '--:--';
       hint.textContent = role === 'seeker'
-        ? 'Tippe auf einen Verstecker in der Liste, wenn du ihn gefunden hast.'
-        : m && m.found ? 'Du wurdest gefunden. Du kannst von hier aus zuschauen.'
-        : `Alle ${S.settings.pingMin} Min. sehen die Sucher kurz, wo du warst. Wirst du gefunden, tippe auf deinen Namen.`;
+        ? 'Tippe auf einen Verstecker in der Liste, wenn du ihn gefangen hast.'
+        : `Alle ${S.settings.pingMin} Min. sehen die Sucher kurz, wo du warst. Wirst du gefangen, tippe auf deinen Namen. Dann wirst du Sucher.`;
     } else {
       $('#phase').textContent = 'Beendet';
       $('#timer').textContent = '00:00';
@@ -513,8 +515,8 @@
       hint.textContent = '';
     }
     const hiders = S.players.filter((p) => p.role === 'hider');
-    const open = hiders.filter((p) => !p.found).length;
-    let note = S.status === 'running' ? `Noch ${open} von ${hiders.length} Verstecker unentdeckt.` : '';
+    const total = hiders.length + S.players.filter((p) => p.found).length;
+    let note = S.status === 'running' ? `Noch ${hiders.length} von ${total} Verstecker frei.` : '';
     if (S.status === 'running' && !(S.pings && S.pings.length) && role === 'seeker') note += ' Noch kein Ping.';
     mapNote.textContent = note;
     if (S.status !== 'ended') updateOutWarn();
@@ -616,6 +618,11 @@
   };
   $('#btnReset').onclick = () => act('reset');
   $('#btnCloseEnd').onclick = () => { showMapAfterEnd = true; $('#endCard').hidden = true; };
+
+  // Tipp für iPhone: als App auf den Home-Bildschirm legen
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const standalone = window.navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+  $('#a2hs').hidden = !(isIOS && !standalone);
 
   // ---------- Start ----------
   $('#name').value = store.get('vs-name') || '';
