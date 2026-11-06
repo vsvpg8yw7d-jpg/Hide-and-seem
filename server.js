@@ -1,4 +1,4 @@
-// Versteckspiel – Server ohne externe Abhängigkeiten (nur Node.js >= 18).
+// Mr. X by Niklas – Server ohne externe Abhängigkeiten (nur Node.js >= 18).
 // Echtzeit über Server-Sent Events (SSE), Aktionen über POST /api/*.
 const http = require('http');
 const fs = require('fs');
@@ -10,14 +10,14 @@ const PUB = __dirname;
 const STATIC = new Set(['index.html', 'style.css', 'app.js']); // nur diese Dateien werden ausgeliefert
 const games = new Map();
 
+const OUT_LIMIT_MS = 60 * 1000;   // so lange darf ein Verstecker draußen sein
+const EXPOSE_MS = 3 * 60 * 1000;  // so lange sehen die Sucher dann den Live-Standort
+const MAX_PINGS = 3;              // aktueller Ping + 2 ältere
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.json': 'application/json',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
 };
 
 const rid = () => crypto.randomBytes(8).toString('hex');
@@ -33,6 +33,11 @@ function newCode() {
   return c;
 }
 
+const newPlayer = (id, name) => ({
+  id, name: cleanName(name), role: null, pos: null, posAt: 0,
+  found: false, outSince: 0, exposedUntil: 0, expPending: false,
+});
+
 function createGame(hostName) {
   const code = newCode();
   const hostId = rid();
@@ -47,20 +52,36 @@ function createGame(hostName) {
     startAt: 0,
     endAt: 0,
     nextPing: 0,
-    lastPing: null,
+    pings: [],
+    event: null,
+    eventSeq: 0,
+    lastLive: 0,
     final: null,
     endReason: null,
   };
-  g.players.set(hostId, { id: hostId, name: cleanName(hostName), role: null, pos: null, posAt: 0 });
+  g.players.set(hostId, newPlayer(hostId, hostName));
   games.set(code, g);
   return g;
 }
 
-function view(g) {
+function addEvent(g, type, text) {
+  g.event = { id: ++g.eventSeq, type, text, at: Date.now() };
+}
+
+function view(g, pid) {
+  const now = Date.now();
+  const viewer = g.players.get(pid);
+  const seeker = viewer && viewer.role === 'seeker';
+  // Live-Standorte bekommen nur Sucher, und nur von Verstecker:innen, die zu lange draußen waren
+  const live = seeker && g.status === 'running'
+    ? [...g.players.values()]
+        .filter((p) => p.role === 'hider' && !p.found && p.exposedUntil > now && p.pos)
+        .map((p) => ({ id: p.id, name: p.name, lat: p.pos.lat, lng: p.pos.lng }))
+    : [];
   return {
     code: g.code,
     status: g.status,
-    now: Date.now(),
+    now,
     hostId: g.hostId,
     settings: g.settings,
     players: [...g.players.values()].map((p) => ({
@@ -68,19 +89,26 @@ function view(g) {
       name: p.name,
       role: p.role,
       online: (g.clients.get(p.id)?.size || 0) > 0,
+      found: p.found,
+      exposedUntil: p.exposedUntil > now ? p.exposedUntil : 0,
     })),
     startAt: g.startAt,
     endAt: g.endAt,
     nextPing: g.nextPing,
-    lastPing: g.lastPing,
+    pings: g.pings,
+    live,
+    event: g.event,
     final: g.final,
     endReason: g.endReason,
   };
 }
 
 function broadcast(g) {
-  const msg = `data: ${JSON.stringify(view(g))}\n\n`;
-  for (const set of g.clients.values()) for (const res of set) res.write(msg);
+  for (const [pid, set] of g.clients) {
+    if (!set.size) continue;
+    const msg = `data: ${JSON.stringify(view(g, pid))}\n\n`;
+    for (const res of set) res.write(msg);
+  }
 }
 
 function finish(g, reason) {
@@ -88,16 +116,35 @@ function finish(g, reason) {
   g.endReason = reason;
   g.final = [...g.players.values()]
     .filter((p) => p.pos)
-    .map((p) => ({ id: p.id, name: p.name, role: p.role, lat: p.pos.lat, lng: p.pos.lng }));
+    .map((p) => ({ id: p.id, name: p.name, role: p.role, found: p.found, lat: p.pos.lat, lng: p.pos.lng }));
   broadcast(g);
 }
 
 function doPing(g, at) {
   const hiders = [...g.players.values()]
-    .filter((p) => p.role === 'hider' && p.pos)
+    .filter((p) => p.role === 'hider' && !p.found && p.pos)
     .map((p) => ({ id: p.id, name: p.name, lat: p.pos.lat, lng: p.pos.lng, age: at - p.posAt }));
-  g.lastPing = { at, hiders };
+  g.pings.push({ at, hiders });
+  if (g.pings.length > MAX_PINGS) g.pings.shift();
 }
+
+function inArea(a, lat, lng) {
+  if (a.type === 'circle') {
+    const [clat, clng] = a.center, R = 6371000, toR = Math.PI / 180;
+    const dLat = (lat - clat) * toR;
+    const dLng = (lng - clng) * toR * Math.cos(((lat + clat) / 2) * toR);
+    return Math.hypot(dLat, dLng) * R <= a.radius;
+  }
+  let c = false;
+  const r = a.points;
+  for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+    const [yi, xi] = r[i], [yj, xj] = r[j];
+    if (yi > lat !== yj > lat && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+
+const unfound = (g) => [...g.players.values()].filter((p) => p.role === 'hider' && !p.found);
 
 // Zeitsteuerung: einmal pro Sekunde
 setInterval(() => {
@@ -121,6 +168,20 @@ setInterval(() => {
         doPing(g, now);
         g.nextPing += g.settings.pingMin * 60e3;
         changed = true;
+      }
+      for (const p of g.players.values()) {
+        if (p.role !== 'hider' || p.found) continue;
+        if (p.outSince && now - p.outSince >= OUT_LIMIT_MS && p.exposedUntil <= now) {
+          p.exposedUntil = now + EXPOSE_MS;
+          p.outSince = p.exposedUntil; // nächste Frist beginnt erst nach der Enthüllung
+          p.expPending = true;
+          addEvent(g, 'exposed', `${p.name} war über 1 Minute außerhalb. Live-Standort für 3 Minuten!`);
+          changed = true;
+        }
+        if (p.expPending && now >= p.exposedUntil) {
+          p.expPending = false;
+          changed = true;
+        }
       }
     }
     if (changed) broadcast(g);
@@ -187,13 +248,11 @@ function act(g, p, b) {
       g.startAt = now + g.settings.countdownSec * 1000;
       g.endAt = g.startAt + g.settings.durationMin * 60e3;
       g.nextPing = g.startAt + g.settings.pingMin * 60e3;
-      g.lastPing = null;
+      g.pings = [];
+      g.event = null;
       g.final = null;
       g.endReason = null;
-      for (const x of list) {
-        x.pos = null;
-        x.posAt = 0;
-      }
+      for (const x of list) Object.assign(x, { pos: null, posAt: 0, found: false, outSince: 0, exposedUntil: 0, expPending: false });
       break;
     }
     case 'pos': {
@@ -201,9 +260,38 @@ function act(g, p, b) {
         lng = Number(b.lng);
       if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180)
         throw new Error('Ungültige Position.');
+      const now = Date.now();
       p.pos = { lat, lng };
-      p.posAt = Date.now();
-      return false; // kein Broadcast: Positionen bleiben geheim bis zum Ping
+      p.posAt = now;
+      if (g.status === 'running' && p.role === 'hider' && !p.found && g.settings.area) {
+        if (!inArea(g.settings.area, lat, lng)) {
+          if (!p.outSince) p.outSince = now;
+        } else {
+          p.outSince = 0;
+        }
+      }
+      // Während der Enthüllung bekommen die Sucher Live-Updates (gedrosselt)
+      if (p.exposedUntil > now && now - g.lastLive > 1500) {
+        g.lastLive = now;
+        broadcast(g);
+      }
+      return false; // sonst kein Broadcast: Positionen bleiben geheim bis zum Ping
+    }
+    case 'found': {
+      if (g.status !== 'running') throw new Error('Gefunden melden geht nur während der Suche.');
+      const t = g.players.get(b.target);
+      if (!t || t.role !== 'hider') throw new Error('Diese Person ist kein Verstecker.');
+      if (t.found) return false;
+      if (p.role !== 'seeker' && p.id !== t.id) throw new Error('Nur Sucher können das melden.');
+      t.found = true;
+      t.exposedUntil = 0;
+      t.outSince = 0;
+      addEvent(g, 'found', `${t.name} wurde gefunden!`);
+      if (unfound(g).length === 0) {
+        finish(g, 'allfound');
+        return false;
+      }
+      break;
     }
     case 'end':
       if (!isHost) throw new Error('Nur der Host kann beenden.');
@@ -214,10 +302,12 @@ function act(g, p, b) {
       if (!isHost) throw new Error('Nur der Host kann eine neue Runde starten.');
       if (g.status !== 'ended') throw new Error('Das Spiel ist noch nicht vorbei.');
       g.status = 'lobby';
-      g.lastPing = null;
+      g.pings = [];
+      g.event = null;
       g.final = null;
       g.endReason = null;
       g.startAt = g.endAt = g.nextPing = 0;
+      for (const x of g.players.values()) Object.assign(x, { pos: null, posAt: 0, found: false, outSince: 0, exposedUntil: 0, expPending: false });
       break;
     case 'leave': {
       g.players.delete(p.id);
@@ -229,6 +319,10 @@ function act(g, p, b) {
         return false;
       }
       if (g.hostId === p.id) g.hostId = g.players.keys().next().value;
+      if ((g.status === 'running' || g.status === 'countdown') && unfound(g).length === 0) {
+        finish(g, [...g.players.values()].some((x) => x.role === 'hider') ? 'allfound' : 'nohiders');
+        return false;
+      }
       break;
     }
     default:
@@ -305,7 +399,7 @@ async function handleApi(req, res, url) {
       if (g.status !== 'lobby') return json(res, 400, { error: 'Das Spiel läuft schon.' });
       if (g.players.size >= 30) return json(res, 400, { error: 'Das Spiel ist voll.' });
       const pid = rid();
-      g.players.set(pid, { id: pid, name: cleanName(b.name), role: null, pos: null, posAt: 0 });
+      g.players.set(pid, newPlayer(pid, b.name));
       g.touched = Date.now();
       broadcast(g);
       return json(res, 200, { code: g.code, pid });
@@ -325,20 +419,17 @@ async function handleApi(req, res, url) {
 function serveStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/') rel = '/index.html';
-  const file = path.join(PUB, path.basename(rel));
-  if (!STATIC.has(path.basename(rel))) {
+  const name = path.basename(rel);
+  if (!STATIC.has(name)) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('Nicht gefunden');
   }
-  fs.readFile(file, (err, data) => {
+  fs.readFile(path.join(PUB, name), (err, data) => {
     if (err) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('Nicht gefunden');
     }
-    res.writeHead(200, {
-      'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-      'Cache-Control': 'no-cache',
-    });
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(name)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     res.end(data);
   });
 }
@@ -349,4 +440,4 @@ http
     if (url.pathname.startsWith('/api/')) return handleApi(req, res, url);
     serveStatic(req, res, url);
   })
-  .listen(PORT, () => console.log(`Versteckspiel läuft auf http://localhost:${PORT}`));
+  .listen(PORT, () => console.log(`Mr. X läuft auf http://localhost:${PORT}`));

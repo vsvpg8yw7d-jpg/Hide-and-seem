@@ -7,6 +7,7 @@
     del(k) { try { localStorage.removeItem(k); } catch (e) {} },
   };
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const vibrate = (p) => { try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) {} };
 
   let S = null;            // letzter Spielstand vom Server
   let off = 0;             // Serverzeit minus Gerätezeit
@@ -19,9 +20,12 @@
   let mode = 'circle';     // Host-Werkzeug: circle | free
   let initAreaSent = false;
   let lastPingAt = 0;
+  let lastEventId = null;  // zuletzt gezeigte Eilmeldung
   let wakeLock = null;
   let showMapAfterEnd = false;
   let endConfirm = false;
+  let foundConfirm = null; // Spieler-ID, die gerade "Gefunden?" bestätigt werden soll
+  let outLocalSince = 0;   // wann ich selbst das Spielfeld verlassen habe
 
   // ---------- Hilfen ----------
   const api = (p, body) =>
@@ -53,6 +57,33 @@
   function show(id) {
     for (const v of document.querySelectorAll('.view')) v.hidden = v.id !== id;
   }
+  const gameActive = () => S && (S.status === 'running' || S.status === 'countdown');
+
+  // ---------- Eilmeldung + rotes Blinken ----------
+  let newsT;
+  function showNews(text, ms) {
+    const n = $('#news');
+    n.textContent = text; n.hidden = false;
+    clearTimeout(newsT);
+    newsT = setTimeout(() => (n.hidden = true), ms);
+  }
+  function redTint() {
+    const f = $('#flash');
+    f.classList.remove('tint');
+    void f.offsetWidth; // Animation neu starten
+    f.classList.add('tint');
+    setTimeout(() => f.classList.remove('tint'), 4100);
+  }
+  function processEvent() {
+    const ev = S.event;
+    if (!ev || ev.id === lastEventId) return;
+    lastEventId = ev.id;
+    const left = 10000 - (nowS() - ev.at);
+    if (left <= 0) return; // alte Meldung, z. B. nach dem Neuladen
+    showNews(ev.text, left);
+    redTint();
+    vibrate([400, 150, 400]);
+  }
 
   // ---------- Standort ----------
   function startGeo() {
@@ -82,7 +113,7 @@
   let lastSent = 0;
   function sendPos(force) {
     if (!session || !S || !myPos) return;
-    if (S.status !== 'countdown' && S.status !== 'running') return;
+    if (!gameActive()) return;
     const t = Date.now();
     if (!force && t - lastSent < 4000) return;
     lastSent = t;
@@ -123,10 +154,32 @@
     }
     return c;
   }
+
+  // Warnung außerhalb des Spielfelds: rotes Blinken + Text; Verstecker werden nach 1 Min. live sichtbar
   function updateOutWarn() {
+    const warn = $('#outWarn'), flash = $('#flash');
+    const m = me();
     const r = S && ring(S.settings.area);
-    const active = S && (S.status === 'running' || S.status === 'countdown');
-    $('#outWarn').hidden = !(active && r && myPos && !inside(r, myPos.lat, myPos.lng));
+    const out = !!(gameActive() && r && myPos && m && !m.found && !inside(r, myPos.lat, myPos.lng));
+    if (out) { if (!outLocalSince) { outLocalSince = Date.now(); vibrate([300, 120, 300]); } } else outLocalSince = 0;
+    flash.classList.toggle('alarm', out);
+
+    const exposedLeft = m && m.exposedUntil ? m.exposedUntil - nowS() : 0;
+    let text = '';
+    if (out) {
+      text = 'Du bist außerhalb des Spielfelds! Geh zurück.';
+      if (m.role === 'hider' && S.status === 'running') {
+        if (exposedLeft > 0) text = `Außerhalb! Die Sucher sehen deinen Live-Standort noch ${fmt(exposedLeft)}.`;
+        else {
+          const sec = Math.max(0, 60 - Math.floor((Date.now() - outLocalSince) / 1000));
+          text = `Du bist außerhalb des Spielfelds! In ${sec} Sek. sehen die Sucher deinen Live-Standort.`;
+        }
+      }
+    } else if (exposedLeft > 0 && m.role === 'hider') {
+      text = `Die Sucher sehen deinen Live-Standort noch ${fmt(exposedLeft)}.`;
+    }
+    warn.hidden = !text;
+    warn.textContent = text;
   }
 
   // ---------- Karte ----------
@@ -138,7 +191,8 @@
       .setView(myPos ? [myPos.lat, myPos.lng] : [52.52, 13.405], 16);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
     M = { el, map, areaLayer: L.layerGroup().addTo(map), areaKey: '', meMarker: null, meCircle: null,
-          pingLayer: L.layerGroup().addTo(map), pingKey: '', endLayer: L.layerGroup().addTo(map), endKey: '', fitted: false };
+          pingLayer: L.layerGroup().addTo(map), pingKey: '', liveLayer: L.layerGroup().addTo(map), liveKey: '',
+          endLayer: L.layerGroup().addTo(map), endKey: '', fitted: false };
     setTimeout(() => map.invalidateSize(), 50);
     map.on('click', (e) => {
       if (!isHost() || !S || S.status !== 'lobby' || mode !== 'circle') return;
@@ -184,20 +238,46 @@
     }
   }
 
+  // Pings: der neueste Punkt ist voll sichtbar, die zwei davor werden blasser; danach verschwinden sie
   function drawPings() {
     if (!M || !S) return;
-    const lp = S.lastPing;
-    const key = lp ? String(lp.at) : '';
+    const pings = S.pings || [];
+    const key = pings.map((p) => p.at).join(',');
     if (key === M.pingKey) return;
     M.pingKey = key;
     M.pingLayer.clearLayers();
-    if (!lp) return;
-    const t = new Date(lp.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    for (const h of lp.hiders) {
+    const n = pings.length;
+    const by = {};
+    pings.forEach((pg, i) => {
+      for (const h of pg.hiders) (by[h.id] = by[h.id] || []).push({ ...h, age: n - 1 - i, at: pg.at });
+    });
+    for (const id in by) {
+      const arr = by[id];
+      if (arr.length > 1) L.polyline(arr.map((a) => [a.lat, a.lng]), { color: '#ff8a3d', weight: 2, opacity: 0.5, dashArray: '4 6', interactive: false }).addTo(M.pingLayer);
+      for (const a of arr) {
+        const t = new Date(a.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const label = a.age === 0 ? `<b>${esc(a.name)} · ${t}</b>` : '';
+        L.marker([a.lat, a.lng], {
+          icon: L.divIcon({ className: '', html: `<div class="pingmark age${a.age}"><i></i>${label}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
+          interactive: false, zIndexOffset: 100 - a.age * 10,
+        }).addTo(M.pingLayer);
+      }
+    }
+  }
+
+  // Live-Standorte von Verstecker:innen, die zu lange außerhalb waren (nur Sucher bekommen sie vom Server)
+  function drawLive() {
+    if (!M || !S) return;
+    const live = S.live || [];
+    const key = JSON.stringify(live);
+    if (key === M.liveKey) return;
+    M.liveKey = key;
+    M.liveLayer.clearLayers();
+    for (const h of live) {
       L.marker([h.lat, h.lng], {
-        icon: L.divIcon({ className: '', html: `<div class="pingmark"><i></i><b>${esc(h.name)} · ${t}</b></div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
-        interactive: false,
-      }).addTo(M.pingLayer);
+        icon: L.divIcon({ className: '', html: `<div class="pingmark live"><i></i><b>${esc(h.name)} · LIVE</b></div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
+        interactive: false, zIndexOffset: 500,
+      }).addTo(M.liveLayer);
     }
   }
 
@@ -212,7 +292,7 @@
     for (const p of S.final) {
       pts.push([p.lat, p.lng]);
       L.marker([p.lat, p.lng], {
-        icon: L.divIcon({ className: '', html: `<div class="pingmark endmark ${p.role}"><i></i><b>${esc(p.name)}</b></div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
+        icon: L.divIcon({ className: '', html: `<div class="pingmark endmark ${p.role}"><i></i><b>${esc(p.name)}${p.found ? ' · gefunden' : ''}</b></div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
         interactive: false,
       }).addTo(M.endLayer);
     }
@@ -277,11 +357,14 @@
   // ---------- Rendering ----------
   function render() {
     if (!S) return;
+    processEvent();
     if (S.status === 'lobby') renderLobby(); else renderGame();
   }
 
   function renderLobby() {
     show('v-lobby');
+    $('#flash').classList.remove('alarm');
+    $('#outWarn').hidden = true;
     $('#codeShow').textContent = S.code;
     const joinUrl = `${location.origin}${location.pathname}?join=${S.code}`;
     if ($('#qr').dataset.url !== joinUrl) {
@@ -332,30 +415,72 @@
     return '';
   }
 
+  // Spielerliste unter der Karte; Sucher tippen auf einen Verstecker = "gefunden"
+  function renderRoster() {
+    const meP = me();
+    if (!meP) return;
+    const running = S.status === 'running';
+    const group = (role, label) => {
+      const items = S.players.filter((p) => p.role === role).map((p) => {
+        const canTap = running && role === 'hider' && !p.found && (meP.role === 'seeker' || p.id === meP.id);
+        const cls = ['pchip', role, p.found ? 'found' : '', foundConfirm === p.id ? 'confirm' : ''].filter(Boolean).join(' ');
+        const name = esc(p.name) + (p.id === meP.id ? ' <small>du</small>' : '');
+        if (canTap) {
+          const txt = foundConfirm === p.id ? (p.id === meP.id ? 'Ich wurde gefunden? Nochmal tippen' : esc(p.name) + ' gefunden? Nochmal tippen') : name;
+          return `<button class="${cls}" data-id="${p.id}">${txt}</button>`;
+        }
+        const tag = p.found ? ' <small>gefunden</small>' : (S.live || []).some((l) => l.id === p.id) ? ' <small>LIVE</small>' : '';
+        return `<span class="${cls}">${name}${tag}</span>`;
+      }).join('');
+      return `<div class="rgroup"><span class="rlabel">${label}</span>${items}</div>`;
+    };
+    const html = group('seeker', 'Sucher') + group('hider', 'Verstecker');
+    const r = $('#roster');
+    if (r.dataset.h !== html) { r.innerHTML = html; r.dataset.h = html; }
+  }
+  $('#roster').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-id]');
+    if (!b || !S || S.status !== 'running') return;
+    const id = b.dataset.id;
+    if (foundConfirm === id) { foundConfirm = null; act('found', { target: id }); renderRoster(); return; }
+    foundConfirm = id;
+    renderRoster();
+    setTimeout(() => { if (foundConfirm === id) { foundConfirm = null; if (S) renderRoster(); } }, 4000);
+  });
+
   function renderGame() {
     show('v-game');
-    const role = me() && me().role;
+    const m = me();
+    const role = m && m.role;
     const tag = $('#roleTag');
-    tag.textContent = role === 'hider' ? 'Verstecker' : 'Sucher';
-    tag.className = 'roletag ' + (role === 'hider' ? 'hider' : 'seeker');
+    if (m && m.found) { tag.textContent = 'Gefunden'; tag.className = 'roletag found'; }
+    else { tag.textContent = role === 'hider' ? 'Verstecker' : 'Sucher'; tag.className = 'roletag ' + (role === 'hider' ? 'hider' : 'seeker'); }
     ensureMap('gameMap');
-    drawArea(); drawPings(); drawFinal(); updateMe(); updateOutWarn();
+    drawArea(); drawPings(); drawLive(); drawFinal(); updateMe(); updateOutWarn(); renderRoster();
     if (M.map.dragging && !M.map.dragging.enabled()) { M.map.dragging.enable(); M.map.touchZoom.enable(); M.map.doubleClickZoom.enable(); M.el.classList.remove('drawing'); }
     $('#btnEnd').hidden = !(isHost() && S.status !== 'ended');
     $('#btnEnd').textContent = endConfirm ? 'Wirklich beenden?' : 'Spiel beenden';
 
-    if (S.lastPing && S.lastPing.at !== lastPingAt) {
-      if (lastPingAt) { toast('Ping! Die Verstecker sind aktualisiert.'); if (navigator.vibrate) navigator.vibrate([200, 100, 200]); }
-      lastPingAt = S.lastPing.at;
+    const lp = S.pings && S.pings.length ? S.pings[S.pings.length - 1].at : 0;
+    if (lp && lp !== lastPingAt) {
+      if (lastPingAt) { toast('Ping! Die Verstecker sind aktualisiert.'); vibrate([200, 100, 200]); }
+      lastPingAt = lp;
     }
-    if (S.status === 'lobby') lastPingAt = 0;
+    if (!lp) lastPingAt = 0;
     if (S.status !== 'ended') { showMapAfterEnd = false; keepAwake(); }
 
     const end = S.status === 'ended';
     $('#endCard').hidden = !(end && !showMapAfterEnd);
     if (end) {
-      $('#endTitle').textContent = S.endReason === 'time' ? 'Zeit abgelaufen' : 'Beendet vom Host';
-      $('#endText').textContent = S.endReason === 'time' ? 'Die Verstecker haben durchgehalten.' : 'Der Host hat das Spiel beendet.';
+      const left = S.players.filter((p) => p.role === 'hider' && !p.found).map((p) => p.name);
+      const T = {
+        time: ['Zeit abgelaufen', left.length ? `Die Verstecker haben gewonnen. Nicht gefunden: ${left.join(', ')}.` : 'Die Verstecker haben durchgehalten.'],
+        allfound: ['Alle gefunden', 'Die Sucher haben gewonnen.'],
+        nohiders: ['Keine Verstecker mehr', 'Alle Verstecker haben das Spiel verlassen.'],
+        host: ['Beendet vom Host', 'Der Host hat das Spiel beendet.'],
+      }[S.endReason] || ['Spiel vorbei', ''];
+      $('#endTitle').textContent = T[0];
+      $('#endText').textContent = T[1];
       $('#btnReset').hidden = !isHost();
     }
     tick();
@@ -365,7 +490,8 @@
     if (!S || S.status === 'lobby') return;
     const now = nowS();
     const hint = $('#gameHint'), mapNote = $('#mapNote');
-    const role = me() && me().role;
+    const m = me();
+    const role = m && m.role;
     if (S.status === 'countdown') {
       $('#phase').textContent = 'Start in';
       $('#timer').textContent = fmt(S.startAt - now);
@@ -376,16 +502,22 @@
       $('#timer').textContent = fmt(S.endAt - now);
       const np = S.nextPing - now;
       $('#pingTimer').textContent = S.nextPing < S.endAt ? fmt(np) : '--:--';
-      hint.textContent = role === 'hider'
-        ? `Alle ${S.settings.pingMin} Min. sehen die Sucher kurz, wo du warst. Danach bleibt der Punkt stehen.`
-        : `Alle ${S.settings.pingMin} Min. erscheinen die Verstecker als Punkt auf der Karte.`;
+      hint.textContent = role === 'seeker'
+        ? 'Tippe auf einen Verstecker in der Liste, wenn du ihn gefunden hast.'
+        : m && m.found ? 'Du wurdest gefunden. Du kannst von hier aus zuschauen.'
+        : `Alle ${S.settings.pingMin} Min. sehen die Sucher kurz, wo du warst. Wirst du gefunden, tippe auf deinen Namen.`;
     } else {
       $('#phase').textContent = 'Beendet';
       $('#timer').textContent = '00:00';
       $('#pingTimer').textContent = '--:--';
       hint.textContent = '';
     }
-    mapNote.textContent = S.status === 'running' && !S.lastPing && role === 'seeker' ? 'Noch kein Ping.' : '';
+    const hiders = S.players.filter((p) => p.role === 'hider');
+    const open = hiders.filter((p) => !p.found).length;
+    let note = S.status === 'running' ? `Noch ${open} von ${hiders.length} Verstecker unentdeckt.` : '';
+    if (S.status === 'running' && !(S.pings && S.pings.length) && role === 'seeker') note += ' Noch kein Ping.';
+    mapNote.textContent = note;
+    if (S.status !== 'ended') updateOutWarn();
   }
   setInterval(tick, 250);
 
@@ -412,7 +544,9 @@
   function leaveLocal(msg) {
     if (es) { es.close(); es = null; }
     if (M) { M.map.remove(); M = null; }
-    session = null; S = null; lastPingAt = 0; initAreaSent = false; endConfirm = false;
+    session = null; S = null; lastPingAt = 0; lastEventId = null; initAreaSent = false; endConfirm = false; foundConfirm = null; outLocalSince = 0;
+    $('#flash').classList.remove('alarm', 'tint');
+    $('#news').hidden = true; $('#outWarn').hidden = true;
     store.del('vs-session');
     history.replaceState(null, '', location.pathname);
     show('v-home');
