@@ -1,0 +1,13 @@
+{
+  "name": "versteckspiel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Verstecken mit GPS: Verstecker gegen Sucher, live im Browser",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

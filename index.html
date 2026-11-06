@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1a14">
+<title>Versteckspiel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- STARTSEITE -->
+<section id="v-home" class="view">
+  <div class="home">
+    <h1>Versteck<wbr>spiel</h1>
+    <p class="lead">Verstecken mit GPS. Verstecker gegen Sucher, live auf der Karte.</p>
+
+    <label for="name">Dein Name</label>
+    <input id="name" type="text" maxlength="20" autocomplete="nickname" placeholder="z. B. Mia">
+
+    <div id="hostBox">
+      <button id="btnHost" class="primary big">Spiel hosten</button>
+      <div class="or"><span>oder beitreten</span></div>
+      <div class="row">
+        <input id="codeIn" type="text" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="Code" aria-label="Spiel-Code">
+        <button id="btnJoin">Beitreten</button>
+      </div>
+    </div>
+    <p class="fine">Das Spiel braucht deinen Standort. Der Browser fragt dich beim Start danach.</p>
+  </div>
+</section>
+
+<!-- LOBBY -->
+<section id="v-lobby" class="view" hidden>
+  <header class="lobbyhead">
+    <div>
+      <div class="eyebrow">Spiel-Code</div>
+      <div id="codeShow" class="code">----</div>
+    </div>
+    <button id="btnCopy" class="ghost">Link kopieren</button>
+  </header>
+
+  <div id="geoWarn" class="warn" hidden>Kein Standort. Erlaube den Standortzugriff in den Browser-Einstellungen, sonst funktioniert das Spiel nicht.</div>
+
+  <div class="qrcard">
+    <div id="qr"></div>
+    <p>Die anderen scannen den Code mit der Kamera und landen in dieser Lobby.</p>
+  </div>
+
+  <h2>Wähle deine Seite</h2>
+  <div class="teams">
+    <button id="teamSeeker" class="team seeker" data-role="seeker" aria-label="Sucher werden">
+      <span class="tname">Sucher</span>
+      <span class="tsub">Finden die anderen</span>
+      <span id="listSeeker" class="chips"></span>
+    </button>
+    <button id="teamHider" class="team hider" data-role="hider" aria-label="Verstecker werden">
+      <span class="tname">Verstecker</span>
+      <span class="tsub">Bleiben unentdeckt</span>
+      <span id="listHider" class="chips"></span>
+    </button>
+  </div>
+  <div id="undecided" class="undecided" hidden></div>
+
+  <h2>Einstellungen</h2>
+  <div class="settings">
+    <div class="srow">
+      <span>Spielzeit</span>
+      <div class="stepper">
+        <button id="durMinus" aria-label="5 Minuten weniger">−</button>
+        <output id="durOut">30 min</output>
+        <button id="durPlus" aria-label="5 Minuten mehr">+</button>
+      </div>
+    </div>
+    <div class="srow">
+      <span>Countdown vor dem Start</span>
+      <select id="cdSel" aria-label="Countdown">
+        <option value="0">Keiner</option>
+        <option value="30">30 Sek.</option>
+        <option value="60">1 Min.</option>
+        <option value="120">2 Min.</option>
+        <option value="180">3 Min.</option>
+        <option value="300">5 Min.</option>
+      </select>
+    </div>
+    <div class="srow">
+      <span>Ping der Verstecker</span>
+      <select id="pingSel" aria-label="Ping-Abstand">
+        <option value="1">alle 1 Min.</option>
+        <option value="2">alle 2 Min.</option>
+        <option value="3">alle 3 Min.</option>
+        <option value="5">alle 5 Min.</option>
+        <option value="10">alle 10 Min.</option>
+      </select>
+    </div>
+  </div>
+
+  <h2>Spielfeld</h2>
+  <div class="mapwrap">
+    <div id="lobbyMap" class="map"></div>
+    <div id="areaTools" class="tools" hidden>
+      <div class="seg">
+        <button id="modeCircle" class="on">Kreis</button>
+        <button id="modeFree">Zeichnen</button>
+      </div>
+      <label id="radiusRow" class="radius">Radius
+        <input id="radius" type="range" min="100" max="3000" step="50" value="500">
+        <output id="radiusOut">500 m</output>
+      </label>
+    </div>
+    <button id="btnLocate" class="locate" aria-label="Zu mir springen">◎</button>
+  </div>
+  <p id="mapHint" class="fine"></p>
+
+  <div class="startbar">
+    <p id="startMsg" class="fine"></p>
+    <button id="btnStart" class="primary big" hidden>Spiel starten</button>
+    <p id="waitMsg" class="fine" hidden>Warte, bis der Host das Spiel startet.</p>
+    <button id="btnLeaveLobby" class="ghost">Lobby verlassen</button>
+  </div>
+</section>
+
+<!-- SPIEL -->
+<section id="v-game" class="view gameview" hidden>
+  <header id="gameTop" class="gametop">
+    <div class="roletag" id="roleTag">Sucher</div>
+    <div class="clock">
+      <div id="phase" class="phase">Restzeit</div>
+      <div id="timer" class="timer">00:00</div>
+    </div>
+    <div class="pingbox">
+      <div class="phase">Nächster Ping</div>
+      <div id="pingTimer" class="timer small">--:--</div>
+    </div>
+  </header>
+  <div id="geoWarn2" class="warn" hidden>Kein Standort. Erlaube den Standortzugriff in den Browser-Einstellungen.</div>
+  <div id="outWarn" class="warn danger" hidden>Du bist außerhalb des Spielfelds!</div>
+  <div class="mapwrap grow">
+    <div id="gameMap" class="map"></div>
+    <button id="btnLocate2" class="locate" aria-label="Zu mir springen">◎</button>
+    <div id="mapNote" class="mapnote"></div>
+  </div>
+  <footer class="gamebar">
+    <p id="gameHint" class="fine"></p>
+    <div class="row">
+      <button id="btnEnd" class="ghost" hidden>Spiel beenden</button>
+      <button id="btnLeaveGame" class="ghost">Verlassen</button>
+    </div>
+  </footer>
+
+  <div id="endCard" class="endcard" hidden>
+    <div class="endinner">
+      <div class="eyebrow">Spiel vorbei</div>
+      <h2 id="endTitle"></h2>
+      <p id="endText"></p>
+      <button id="btnReset" class="primary" hidden>Neue Runde</button>
+      <button id="btnCloseEnd" class="ghost">Karte ansehen</button>
+      <button id="btnLeaveEnd" class="ghost">Spiel verlassen</button>
+    </div>
+  </div>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
