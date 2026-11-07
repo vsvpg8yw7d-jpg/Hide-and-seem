@@ -18,14 +18,19 @@
   let geoDenied = false;
   let M = null;            // aktuelle Karte
   let mode = 'circle';     // Host-Werkzeug: circle | free
+  let selMode = 'normal';  // gewählter Spielmodus auf der Startseite
   let initAreaSent = false;
   let lastPingAt = 0;
-  let lastEventId = null;  // zuletzt gezeigte Eilmeldung
+  let lastEventId = 0;     // zuletzt gezeigte Eilmeldung
   let wakeLock = null;
   let showMapAfterEnd = false;
   let endConfirm = false;
-  let foundConfirm = null; // Spieler-ID, die gerade "Gefunden?" bestätigt werden soll
+  let foundConfirm = null; // Spieler-ID, die gerade "Gefangen?" bestätigt werden soll
   let outLocalSince = 0;   // wann ich selbst das Spielfeld verlassen habe
+  let chat = { role: null, msgs: [] };
+  let unread = 0;
+  let chatVisible = false;
+  let compassHeading = null, gpsHeading = null, gpsHeadingAt = 0, compassActive = false;
 
   // ---------- Hilfen ----------
   const api = (p, body) =>
@@ -59,14 +64,14 @@
   }
   const gameActive = () => S && (S.status === 'running' || S.status === 'countdown');
 
-  // ---------- Eilmeldung + rotes Blinken ----------
+  // ---------- Eilmeldung (Lauftext von rechts nach links) + rotes Blinken ----------
   let newsT;
   function showNews(text, ms) {
     const n = $('#news');
     n.innerHTML = '<div class="news-label">Eilmeldung</div><div class="news-track"><span class="news-text"></span></div>';
     const t = n.querySelector('.news-text');
     t.textContent = text;
-    t.style.animationDuration = ms + 'ms'; // Lauftext: läuft in der Restzeit der 10 Sekunden einmal durch
+    t.style.animationDuration = ms + 'ms';
     n.hidden = false;
     clearTimeout(newsT);
     newsT = setTimeout(() => (n.hidden = true), ms);
@@ -78,24 +83,28 @@
     f.classList.add('tint');
     setTimeout(() => f.classList.remove('tint'), 4100);
   }
-  function processEvent() {
-    const ev = S.event;
-    if (!ev || ev.id === lastEventId) return;
-    lastEventId = ev.id;
-    const left = 10000 - (nowS() - ev.at);
-    if (left <= 0) return; // alte Meldung, z. B. nach dem Neuladen
-    showNews(ev.text, left);
+  function processEvents() {
+    const evs = (S.events || []).filter((e) => e.id > lastEventId);
+    if (!evs.length) return;
+    lastEventId = Math.max(...evs.map((e) => e.id));
+    const fresh = evs.filter((e) => nowS() - e.at < 10000); // alte Meldungen (z. B. nach dem Neuladen) überspringen
+    if (!fresh.length) return;
+    const left = 10000 - (nowS() - fresh[fresh.length - 1].at);
+    showNews(fresh.map((e) => e.text).join('   •   '), Math.max(left, 6000));
     redTint();
     vibrate([400, 150, 400]);
   }
 
-  // ---------- Standort ----------
+  // ---------- Standort und Blickrichtung ----------
   function startGeo() {
     if (!navigator.geolocation) { geoDenied = true; updateGeoWarn(); return; }
     if (watchId != null) return;
     watchId = navigator.geolocation.watchPosition(
       (p) => {
         myPos = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy };
+        if (typeof p.coords.heading === 'number' && !isNaN(p.coords.heading) && (p.coords.speed || 0) > 0.7) {
+          gpsHeading = p.coords.heading; gpsHeadingAt = Date.now();
+        }
         geoDenied = false; updateGeoWarn(); onPos();
       },
       (err) => {
@@ -108,6 +117,47 @@
     $('#geoWarn').hidden = !geoDenied;
     $('#geoWarn2').hidden = !geoDenied;
   }
+
+  // Kompass: auf dem iPhone braucht er eine Erlaubnis per Fingertipp
+  function onOrient(e) {
+    let h = null;
+    if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;
+    else if (e.absolute && typeof e.alpha === 'number') h = (360 - e.alpha + ((screen.orientation && screen.orientation.angle) || 0)) % 360;
+    if (h == null || isNaN(h)) return;
+    compassHeading = h;
+    applyHeading();
+  }
+  function startCompass() {
+    if (compassActive || !window.DeviceOrientationEvent) return;
+    const go = () => {
+      compassActive = true;
+      window.addEventListener('deviceorientationabsolute', onOrient, true);
+      window.addEventListener('deviceorientation', onOrient, true);
+      $('#btnCompass').hidden = true;
+    };
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().then((r) => { if (r === 'granted') go(); }).catch(() => {});
+    } else go();
+  }
+  const needsCompassTap = () => window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function' && !compassActive;
+  const heading = () => {
+    if (compassHeading != null) return compassHeading;
+    if (gpsHeading != null && Date.now() - gpsHeadingAt < 8000) return gpsHeading;
+    return null;
+  };
+  let lastHeadApply = 0;
+  function applyHeading() {
+    const t = Date.now();
+    if (t - lastHeadApply < 80) return;
+    lastHeadApply = t;
+    const el = M && M.meMarker && M.meMarker.getElement();
+    const d = el && el.querySelector('.me-dir');
+    if (!d) return;
+    const h = heading();
+    d.style.display = h == null ? 'none' : 'block';
+    if (h != null) d.style.transform = `rotate(${h}deg)`;
+  }
+
   function onPos() {
     updateMe();
     maybeInitArea();
@@ -160,11 +210,11 @@
   }
 
   // Warnung außerhalb des Spielfelds: nur für Verstecker und erst nach dem Countdown.
-  // Nach 1 Minute draußen werden sie 3 Minuten lang live für die Sucher sichtbar.
+  // Nach 1 Min. draußen sind sie 3 Min. live sichtbar, nach 3 Min. draußen werden sie automatisch gefangen.
   function updateOutWarn() {
     const warn = $('#outWarn'), flash = $('#flash');
     const m = me();
-    const r = S && ring(S.settings.area);
+    const r = S && ring(S.area);
     const hiderNow = !!(m && m.role === 'hider' && S.status === 'running');
     const out = !!(hiderNow && r && myPos && !inside(r, myPos.lat, myPos.lng));
     if (out) { if (!outLocalSince) { outLocalSince = Date.now(); vibrate([300, 120, 300]); } } else outLocalSince = 0;
@@ -173,11 +223,11 @@
     const exposedLeft = hiderNow && m.exposedUntil ? m.exposedUntil - nowS() : 0;
     let text = '';
     if (out) {
-      if (exposedLeft > 0) text = `Außerhalb! Die Sucher sehen deinen Live-Standort noch ${fmt(exposedLeft)}.`;
-      else {
-        const sec = Math.max(0, 60 - Math.floor((Date.now() - outLocalSince) / 1000));
-        text = `Du bist außerhalb des Spielfelds! In ${sec} Sek. sehen die Sucher deinen Live-Standort.`;
-      }
+      const el = Math.floor((Date.now() - outLocalSince) / 1000);
+      const left = Math.max(0, 180 - el);
+      text = el >= 60
+        ? `Außerhalb! Die Sucher sehen dich live. Noch ${left} Sek., dann wirst du gefangen.`
+        : `Du bist außerhalb des Spielfelds! Geh zurück. In ${60 - el} Sek. sehen dich die Sucher live, nach ${left} Sek. wirst du gefangen.`;
     } else if (exposedLeft > 0) {
       text = `Die Sucher sehen deinen Live-Standort noch ${fmt(exposedLeft)}.`;
     }
@@ -212,21 +262,27 @@
     const ll = [myPos.lat, myPos.lng];
     const role = me() && me().role;
     if (!M.meMarker) {
-      M.meMarker = L.marker(ll, { icon: L.divIcon({ className: '', html: `<div class="me-dot ${role === 'hider' ? 'hider' : ''}"></div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: false, zIndexOffset: 1000 }).addTo(M.map);
+      M.meMarker = L.marker(ll, {
+        icon: L.divIcon({ className: '', html: `<div class="me-wrap"><div class="me-dir"></div><div class="me-dot ${role === 'hider' ? 'hider' : ''}"></div></div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
+        interactive: false, zIndexOffset: 1000,
+      }).addTo(M.map);
       M.meCircle = L.circle(ll, { radius: myPos.acc || 10, color: '#46c2ff', weight: 1, fillOpacity: 0.1, interactive: false }).addTo(M.map);
-      if (!S || !S.settings.area) M.map.setView(ll, 16);
+      if (!S || !S.area) M.map.setView(ll, 16);
     } else {
       M.meMarker.setLatLng(ll);
       M.meCircle.setLatLng(ll).setRadius(myPos.acc || 10);
-      const el = M.meMarker.getElement() && M.meMarker.getElement().firstChild;
+      const el = M.meMarker.getElement() && M.meMarker.getElement().querySelector('.me-dot');
       if (el) el.classList.toggle('hider', role === 'hider');
     }
+    lastHeadApply = 0;
+    applyHeading();
   }
 
+  // Aktuelle Zone; im Modus "Schrumpfende Zone" zusätzlich die nächste, kleinere Zone als dünne weiße Linie
   function drawArea() {
     if (!M || !S) return;
-    const a = S.settings.area;
-    const key = JSON.stringify(a);
+    const a = S.area;
+    const key = JSON.stringify([a, S.nextArea]);
     if (key === M.areaKey) return;
     M.areaKey = key;
     M.areaLayer.clearLayers();
@@ -235,8 +291,11 @@
     const world = [[-85, -180], [-85, 180], [85, 180], [85, -180]];
     L.polygon([world, r], { stroke: false, fillColor: '#07120b', fillOpacity: 0.45, interactive: false }).addTo(M.areaLayer);
     const outline = L.polygon(r, { color: '#ffd166', weight: 3, fill: false, dashArray: '8 6', interactive: false }).addTo(M.areaLayer);
+    const nr = ring(S.nextArea);
+    if (nr) L.polygon(nr, { color: '#ffffff', weight: 2, opacity: 0.8, fill: false, dashArray: '2 6', interactive: false }).addTo(M.areaLayer);
     if (!M.fitted || !isHost() || S.status !== 'lobby') {
-      M.map.fitBounds(outline.getBounds(), { padding: [30, 30] });
+      if (!M.fitted) M.map.fitBounds(outline.getBounds(), { padding: [30, 30] });
+      else if (S.status === 'lobby') M.map.fitBounds(outline.getBounds(), { padding: [30, 30] });
       M.fitted = true;
     }
   }
@@ -268,7 +327,7 @@
     }
   }
 
-  // Live-Standorte von Verstecker:innen, die zu lange außerhalb waren (nur Sucher bekommen sie vom Server)
+  // Live-Standorte (nur Sucher bekommen sie vom Server)
   function drawLive() {
     if (!M || !S) return;
     const live = S.live || [];
@@ -357,10 +416,51 @@
     act('settings', { area: { type: 'circle', center: c, radius: +$('#radius').value } });
   }
 
+  // ---------- Chat (getrennt nach Suchern und Verstecker:innen) ----------
+  function renderChat() {
+    const m = me();
+    const role = m && m.role;
+    const box = $('#chat');
+    box.className = 'chat ' + (role === 'hider' ? 'hider' : 'seeker');
+    $('#chatTitle').textContent = role === 'hider' ? 'Chat der Verstecker' : 'Chat der Sucher';
+    const log = $('#chatLog');
+    const msgs = chat.role === role ? chat.msgs : [];
+    const html = msgs.map((x) => `<div class="msg ${x.pid === session.pid ? 'mine' : ''}"><b>${esc(x.name)}</b>${esc(x.text)}</div>`).join('');
+    if (log.dataset.h !== html) {
+      const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+      log.innerHTML = html; log.dataset.h = html;
+      if (atBottom || !log.dataset.init) { log.scrollTop = log.scrollHeight; log.dataset.init = '1'; }
+    }
+    $('#btnChat').textContent = unread ? `Chat (${unread} neu)` : 'Chat';
+  }
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver((en) => {
+      chatVisible = en[0].isIntersecting;
+      if (chatVisible && unread) { unread = 0; if (S && S.status !== 'lobby') renderChat(); }
+    }, { threshold: 0.4 }).observe($('#chat'));
+  }
+  function onChat(data) {
+    const prevLen = chat.role === data.role ? chat.msgs.length : 0;
+    const roleChanged = chat.role !== data.role;
+    chat = data;
+    if (roleChanged) { unread = 0; $('#chatLog').dataset.h = ''; }
+    const added = data.msgs.slice(prevLen).filter((x) => x.pid !== (session && session.pid)).length;
+    if (!roleChanged && added && !chatVisible) unread += added;
+    if (S && S.status !== 'lobby') renderChat();
+  }
+  $('#chatForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const inp = $('#chatIn'), text = inp.value.trim();
+    if (!text || !session) return;
+    inp.value = '';
+    act('chat', { text });
+  });
+  $('#btnChat').onclick = () => { unread = 0; renderChat(); $('#chat').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+
   // ---------- Rendering ----------
   function render() {
     if (!S) return;
-    processEvent();
+    processEvents();
     if (S.status === 'lobby') renderLobby(); else renderGame();
   }
 
@@ -382,13 +482,16 @@
     $('#listHider').innerHTML = S.players.filter((p) => p.role === 'hider').map(chip).join('');
     const un = S.players.filter((p) => !p.role);
     $('#undecided').hidden = !un.length;
-    $('#undecided').textContent = un.length ? 'Noch ohne Seite: ' + un.map((p) => p.name).join(', ') : '';
+    $('#undecided').textContent = un.length ? 'Noch ohne Seite (beim Start nicht dabei): ' + un.map((p) => p.name).join(', ') : '';
     const mine = me() && me().role;
     $('#teamSeeker').classList.toggle('mine', mine === 'seeker');
     $('#teamHider').classList.toggle('mine', mine === 'hider');
 
     const st = S.settings, host = isHost();
     $('.settings').classList.toggle('locked', !host);
+    $('#modeSel').value = st.mode;
+    $('#shrinkSel').value = String(st.shrinkPct);
+    $('#shrinkRow').hidden = st.mode !== 'shrink';
     $('#durOut').textContent = st.durationMin + ' min';
     $('#cdSel').value = String(st.countdownSec);
     $('#pingSel').value = String(st.pingMin);
@@ -411,14 +514,15 @@
 
   function startProblem() {
     if (!S) return '';
-    const list = S.players;
-    if (list.some((p) => !p.role)) return 'Alle müssen eine Seite wählen.';
+    const m = me();
+    if (!m || !m.role) return 'Wähle zuerst selbst eine Seite.';
+    const list = S.players.filter((p) => p.role);
     if (!list.some((p) => p.role === 'seeker') || !list.some((p) => p.role === 'hider')) return 'Es braucht mindestens einen Sucher und einen Verstecker.';
     if (!S.settings.area) return 'Das Spielfeld wird noch angelegt.';
     return '';
   }
 
-  // Spielerliste unter der Karte; Sucher tippen auf einen Verstecker = "gefunden"
+  // Spielerliste unter der Karte; Sucher tippen auf einen Verstecker = "gefangen"
   function renderRoster() {
     const meP = me();
     if (!meP) return;
@@ -429,7 +533,7 @@
         const cls = ['pchip', role, foundConfirm === p.id ? 'confirm' : ''].filter(Boolean).join(' ');
         const name = esc(p.name) + (p.id === meP.id ? ' <small>du</small>' : '');
         if (canTap) {
-          const txt = foundConfirm === p.id ? (p.id === meP.id ? 'Ich wurde gefunden? Nochmal tippen' : esc(p.name) + ' gefunden? Nochmal tippen') : name;
+          const txt = foundConfirm === p.id ? (p.id === meP.id ? 'Ich wurde gefangen? Nochmal tippen' : esc(p.name) + ' gefangen? Nochmal tippen') : name;
           return `<button class="${cls}" data-id="${p.id}">${txt}</button>`;
         }
         const tag = p.found ? ' <small>gefangen</small>' : (S.live || []).some((l) => l.id === p.id) ? ' <small>LIVE</small>' : '';
@@ -459,7 +563,8 @@
     tag.textContent = role === 'hider' ? 'Verstecker' : 'Sucher';
     tag.className = 'roletag ' + (role === 'hider' ? 'hider' : 'seeker');
     ensureMap('gameMap');
-    drawArea(); drawPings(); drawLive(); drawFinal(); updateMe(); updateOutWarn(); renderRoster();
+    drawArea(); drawPings(); drawLive(); drawFinal(); updateMe(); updateOutWarn(); renderRoster(); renderChat();
+    $('#btnCompass').hidden = !needsCompassTap();
     if (M.map.dragging && !M.map.dragging.enabled()) { M.map.dragging.enable(); M.map.touchZoom.enable(); M.map.doubleClickZoom.enable(); M.el.classList.remove('drawing'); }
     $('#btnEnd').hidden = !(isHost() && S.status !== 'ended');
     $('#btnEnd').textContent = endConfirm ? 'Wirklich beenden?' : 'Spiel beenden';
@@ -475,15 +580,17 @@
     const end = S.status === 'ended';
     $('#endCard').hidden = !(end && !showMapAfterEnd);
     if (end) {
-      const left = S.players.filter((p) => p.role === 'hider').map((p) => p.name);
-      const T = {
-        time: ['Zeit abgelaufen', left.length ? `Die Verstecker haben gewonnen. Nicht gefunden: ${left.join(', ')}.` : 'Die Verstecker haben durchgehalten.'],
-        allfound: ['Alle gefangen', 'Alle Verstecker wurden gefangen. Die Sucher haben gewonnen.'],
-        nohiders: ['Keine Verstecker mehr', 'Alle Verstecker haben das Spiel verlassen.'],
-        host: ['Beendet vom Host', 'Der Host hat das Spiel beendet.'],
-      }[S.endReason] || ['Spiel vorbei', ''];
-      $('#endTitle').textContent = T[0];
-      $('#endText').textContent = T[1];
+      const survivors = S.players.filter((p) => p.role === 'hider').map((p) => p.name);
+      let title = 'Spiel vorbei', text = '';
+      if (S.endReason === 'time') {
+        if (survivors.length === 1) { title = `🏆🏆 ${survivors[0]} hat gewonnen 🏆🏆`; text = 'Als Einziger nicht gefangen.'; }
+        else if (survivors.length > 1) { title = 'Zeit abgelaufen'; text = 'Überlebt haben: ' + survivors.join(', ') + '.'; }
+        else { title = 'Zeit abgelaufen'; }
+      } else if (S.endReason === 'allfound') { title = 'Die Sucher haben gewonnen'; text = 'Alle Verstecker wurden gefangen.'; }
+      else if (S.endReason === 'nohiders') { title = 'Keine Verstecker mehr'; text = 'Alle Verstecker haben das Spiel verlassen.'; }
+      else if (S.endReason === 'host') { title = 'Beendet vom Host'; text = 'Der Host hat das Spiel beendet.'; }
+      $('#endTitle').textContent = title;
+      $('#endText').textContent = text;
       $('#btnReset').hidden = !isHost();
     }
     tick();
@@ -495,6 +602,7 @@
     const hint = $('#gameHint'), mapNote = $('#mapNote');
     const m = me();
     const role = m && m.role;
+    const shrink = S.settings.mode === 'shrink';
     if (S.status === 'countdown') {
       $('#phase').textContent = 'Start in';
       $('#timer').textContent = fmt(S.startAt - now);
@@ -505,9 +613,10 @@
       $('#timer').textContent = fmt(S.endAt - now);
       const np = S.nextPing - now;
       $('#pingTimer').textContent = S.nextPing < S.endAt ? fmt(np) : '--:--';
-      hint.textContent = role === 'seeker'
+      const sh = shrink ? ` Die Zone schrumpft bei jedem Ping um ${S.settings.shrinkPct} %.` : '';
+      hint.textContent = (role === 'seeker'
         ? 'Tippe auf einen Verstecker in der Liste, wenn du ihn gefangen hast.'
-        : `Alle ${S.settings.pingMin} Min. sehen die Sucher kurz, wo du warst. Wirst du gefangen, tippe auf deinen Namen. Dann wirst du Sucher.`;
+        : `Alle ${S.settings.pingMin} Min. sehen die Sucher kurz, wo du warst. Wirst du gefangen, tippe auf deinen Namen. Dann wirst du Sucher.`) + sh;
     } else {
       $('#phase').textContent = 'Beendet';
       $('#timer').textContent = '00:00';
@@ -517,6 +626,7 @@
     const hiders = S.players.filter((p) => p.role === 'hider');
     const total = hiders.length + S.players.filter((p) => p.found).length;
     let note = S.status === 'running' ? `Noch ${hiders.length} von ${total} Verstecker frei.` : '';
+    if (S.area && S.area.type === 'circle' && S.status !== 'ended') note += ` Zone: ${Math.round(S.area.radius)} m.`;
     if (S.status === 'running' && !(S.pings && S.pings.length) && role === 'seeker') note += ' Noch kein Ping.';
     mapNote.textContent = note;
     if (S.status !== 'ended') updateOutWarn();
@@ -532,7 +642,9 @@
       off = S.now - Date.now();
       render();
     };
+    es.addEventListener('chat', (e) => onChat(JSON.parse(e.data)));
     es.addEventListener('gone', () => leaveLocal('Dieses Spiel gibt es nicht mehr.'));
+    es.addEventListener('kicked', () => leaveLocal('Du hattest keine Seite gewählt und bist in dieser Runde nicht dabei.'));
   }
 
   function enter(s) {
@@ -540,13 +652,15 @@
     store.set('vs-session', JSON.stringify(s));
     initAreaSent = false;
     startGeo();
+    startCompass();
     connect();
   }
 
   function leaveLocal(msg) {
     if (es) { es.close(); es = null; }
     if (M) { M.map.remove(); M = null; }
-    session = null; S = null; lastPingAt = 0; lastEventId = null; initAreaSent = false; endConfirm = false; foundConfirm = null; outLocalSince = 0;
+    session = null; S = null; lastPingAt = 0; lastEventId = 0; initAreaSent = false; endConfirm = false; foundConfirm = null; outLocalSince = 0;
+    chat = { role: null, msgs: [] }; unread = 0; $('#chatLog').dataset.h = '';
     $('#flash').classList.remove('alarm', 'tint');
     $('#news').hidden = true; $('#outWarn').hidden = true;
     store.del('vs-session');
@@ -558,23 +672,36 @@
   const getName = () => { const n = $('#name').value.trim(); store.set('vs-name', n); return n; };
 
   // ---------- Ereignisse ----------
+  for (const b of document.querySelectorAll('#modePick .mode')) {
+    b.onclick = () => {
+      selMode = b.dataset.mode;
+      store.set('vs-mode', selMode);
+      for (const x of document.querySelectorAll('#modePick .mode')) {
+        x.classList.toggle('on', x === b);
+        x.setAttribute('aria-checked', x === b ? 'true' : 'false');
+      }
+    };
+  }
   $('#btnHost').onclick = async () => {
     const name = getName();
     if (!name) { toast('Gib zuerst deinen Namen ein.'); $('#name').focus(); return; }
-    startGeo();
-    try { enter(await api('create', { name })); } catch (e) { toast(e.message); }
+    startGeo(); startCompass();
+    try { enter(await api('create', { name, mode: selMode })); } catch (e) { toast(e.message); }
   };
   $('#btnJoin').onclick = async () => {
     const name = getName(), code = $('#codeIn').value.trim().toUpperCase();
     if (!name) { toast('Gib zuerst deinen Namen ein.'); $('#name').focus(); return; }
     if (code.length !== 4) { toast('Der Code hat 4 Zeichen.'); $('#codeIn').focus(); return; }
-    startGeo();
+    startGeo(); startCompass();
     try { enter(await api('join', { name, code })); history.replaceState(null, '', location.pathname); } catch (e) { toast(e.message); }
   };
   $('#codeIn').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#btnJoin').click(); });
+  $('#btnCompass').onclick = () => startCompass();
 
   for (const b of document.querySelectorAll('.team')) b.onclick = () => act('role', { role: b.dataset.role });
 
+  $('#modeSel').onchange = (e) => act('settings', { mode: e.target.value });
+  $('#shrinkSel').onchange = (e) => act('settings', { shrinkPct: +e.target.value });
   $('#durMinus').onclick = () => isHost() && act('settings', { durationMin: S.settings.durationMin - 5 });
   $('#durPlus').onclick = () => isHost() && act('settings', { durationMin: S.settings.durationMin + 5 });
   $('#cdSel').onchange = (e) => act('settings', { countdownSec: +e.target.value });
@@ -626,6 +753,7 @@
 
   // ---------- Start ----------
   $('#name').value = store.get('vs-name') || '';
+  if (store.get('vs-mode') === 'shrink') document.querySelector('#modePick .mode[data-mode="shrink"]').click();
   const joinParam = (new URLSearchParams(location.search).get('join') || '').toUpperCase().slice(0, 4);
   let saved = null;
   try { saved = JSON.parse(store.get('vs-session') || 'null'); } catch (e) {}
@@ -635,6 +763,8 @@
     if (joinParam) {
       $('#codeIn').value = joinParam;
       $('#btnHost').hidden = true;
+      $('#modePick').hidden = true;
+      document.querySelector('.modehead').hidden = true;
       document.querySelector('.or').hidden = true;
       $('.lead').textContent = `Du wurdest in die Lobby ${joinParam} eingeladen. Gib deinen Namen ein.`;
     }

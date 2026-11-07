@@ -34,6 +34,11 @@
     <input id="name" type="text" maxlength="20" autocomplete="nickname" placeholder="z. B. Mia">
 
     <div id="hostBox">
+      <div class="eyebrow modehead">Spielmodus</div>
+      <div id="modePick" class="modes" role="radiogroup" aria-label="Spielmodus">
+        <button type="button" class="mode on" data-mode="normal" role="radio" aria-checked="true"><b>Normal</b><span>Feste Zone, Pings in festen Abständen.</span></button>
+        <button type="button" class="mode" data-mode="shrink" role="radio" aria-checked="false"><b>Schrumpfende Zone</b><span>Die Zone wird bei jedem Ping kleiner.</span></button>
+      </div>
       <button id="btnHost" class="primary big">Spiel hosten</button>
       <div class="or"><span>oder beitreten</span></div>
       <div class="row">
@@ -80,6 +85,23 @@
 
   <h2>Einstellungen</h2>
   <div class="settings">
+    <div class="srow">
+      <span>Spielmodus</span>
+      <select id="modeSel" aria-label="Spielmodus">
+        <option value="normal">Normal</option>
+        <option value="shrink">Schrumpfende Zone</option>
+      </select>
+    </div>
+    <div class="srow" id="shrinkRow">
+      <span>Zone schrumpft pro Ping um</span>
+      <select id="shrinkSel" aria-label="Schrumpfung pro Ping">
+        <option value="5">5 %</option>
+        <option value="10">10 %</option>
+        <option value="15">15 %</option>
+        <option value="20">20 %</option>
+        <option value="25">25 %</option>
+      </select>
+    </div>
     <div class="srow">
       <span>Spielzeit</span>
       <div class="stepper">
@@ -154,21 +176,32 @@
   <div class="mapwrap grow">
     <div id="gameMap" class="map"></div>
     <button id="btnLocate2" class="locate" aria-label="Zu mir springen">◎</button>
+    <button id="btnCompass" class="locate compass" aria-label="Kompass einschalten" hidden>🧭</button>
     <div id="mapNote" class="mapnote"></div>
   </div>
   <div id="roster" class="roster"></div>
   <footer class="gamebar">
     <p id="gameHint" class="fine"></p>
     <div class="row">
+      <button id="btnChat" class="ghost">Chat</button>
       <button id="btnEnd" class="ghost" hidden>Spiel beenden</button>
       <button id="btnLeaveGame" class="ghost">Verlassen</button>
     </div>
   </footer>
 
+  <section id="chat" class="chat">
+    <h2 id="chatTitle">Chat</h2>
+    <div id="chatLog" class="chatlog" role="log" aria-live="polite"></div>
+    <form id="chatForm" class="row" autocomplete="off">
+      <input id="chatIn" type="text" maxlength="200" placeholder="Nachricht an dein Team" aria-label="Nachricht an dein Team">
+      <button type="submit" class="primary">Senden</button>
+    </form>
+  </section>
+
   <div id="endCard" class="endcard" hidden>
     <div class="endinner">
       <div class="eyebrow">Spiel vorbei</div>
-      <h2 id="endTitle"></h2>
+      <h2 id="endTitle" class="winner"></h2>
       <p id="endText"></p>
       <button id="btnReset" class="primary" hidden>Neue Runde</button>
       <button id="btnCloseEnd" class="ghost">Karte ansehen</button>

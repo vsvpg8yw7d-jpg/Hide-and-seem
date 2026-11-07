@@ -97,7 +97,8 @@ button.ghost { background: transparent; }
 
 .mapwrap { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); }
 .map { height: 340px; background: #20332a; }
-.mapwrap.grow { flex: 1; min-height: 0; border-radius: 0; border-inline: 0; }
+.mapwrap.grow { height: 58dvh; min-height: 300px; border-radius: 0; border-inline: 0; }
+.mapwrap.grow .map { height: 100%; }
 .map.drawing { touch-action: none !important; cursor: crosshair; }
 .tools { position: absolute; z-index: 500; left: 8px; right: 8px; top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; background: rgba(15,26,20,.88); padding: 8px; border-radius: 12px; }
 .seg { display: flex; }
@@ -115,8 +116,8 @@ button.ghost { background: transparent; }
 .startbar { margin-top: 24px; display: flex; flex-direction: column; gap: 6px; }
 
 /* Spielansicht */
-.gameview { max-width: none; padding: 0; display: flex; flex-direction: column; height: 100%; margin: 0; }
-.gametop { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 10px 0; }
+.gameview { max-width: none; padding: 0; display: block; margin: 0; }
+.gametop { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 10px 0; position: sticky; top: env(safe-area-inset-top, 0px); z-index: 600; background: var(--bg); }
 .roletag { font-weight: 800; font-size: 18px; padding: 6px 12px; border-radius: 8px; color: #06131c; }
 .roletag.seeker { background: var(--seeker); }
 .roletag.hider { background: var(--hider); color: #1f0d00; }
@@ -125,7 +126,7 @@ button.ghost { background: transparent; }
 .timer.small { font-size: 22px; }
 .pingbox { text-align: right; }
 .gamebar { padding: 8px 0 12px; }
-.gamebar .row { justify-content: flex-end; }
+.gamebar .row { justify-content: flex-end; flex-wrap: wrap; }
 .gamebar .fine { margin: 0 0 8px; }
 
 .endcard { position: fixed; inset: 0; z-index: 1000; background: rgba(8,14,10,.82); display: grid; place-items: center; padding: 20px; }
@@ -166,7 +167,7 @@ button.pchip { cursor: pointer; }
 .news-label { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; opacity: .85; padding: 0 16px 2px; }
 .news-track { overflow: hidden; white-space: nowrap; }
 .news-text { display: inline-block; font: 800 22px/1.3 var(--display); animation: ticker 10s linear forwards; }
-@keyframes ticker { from { transform: translateX(-100%); } to { transform: translateX(100vw); } }
+@keyframes ticker { from { transform: translateX(100vw); } to { transform: translateX(-100%); } }
 #flash { position: fixed; inset: 0; z-index: 1500; pointer-events: none; opacity: 0; }
 #flash.alarm { opacity: 1; animation: alarm 1s ease-in-out infinite; }
 #flash.tint { opacity: 1; animation: tint 4s ease-out forwards; background: rgba(255, 40, 40, .3); box-shadow: inset 0 0 80px 20px rgba(255, 40, 40, .6); }
@@ -185,3 +186,35 @@ button.pchip { cursor: pointer; }
 .pingmark.age2 i { opacity: .28; transform: scale(.65); }
 .pingmark.live i { background: var(--danger); animation: livepulse 1.2s infinite; }
 @keyframes livepulse { 0% { box-shadow: 0 0 0 0 rgba(255,93,93,.8); } 100% { box-shadow: 0 0 0 18px rgba(255,93,93,0); } }
+
+/* Version 4 */
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); background: var(--bg); z-index: 700; }
+.modehead { margin: 4px 0 8px; }
+.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mode { text-align: left; display: flex; flex-direction: column; gap: 4px; padding: 12px; border-width: 2px; min-width: 0; }
+.mode b { font-family: var(--display); font-size: 17px; }
+.mode span { font-size: 13px; color: var(--muted); font-weight: 500; }
+.mode.on { border-color: var(--field); background: color-mix(in srgb, var(--field) 12%, var(--panel)); }
+.compass { bottom: 82px; }
+
+/* Blickrichtung: gelber Strich am eigenen Punkt */
+.me-wrap { position: relative; width: 22px; height: 22px; }
+.me-dir { position: absolute; left: 50%; top: 50%; width: 5px; height: 36px; margin-left: -2.5px; margin-top: -36px; transform-origin: 50% 100%;
+  background: #ffd166; border-radius: 3px; border: 1px solid rgba(0,0,0,.45); display: none; }
+.me-wrap .me-dot { position: relative; }
+
+/* Chat */
+.chat { padding: 4px 0 40px; }
+.chat h2 { margin-top: 20px; }
+.chat.seeker h2 { color: var(--seeker); }
+.chat.hider h2 { color: var(--hider); }
+.chatlog { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; height: 220px; overflow-y: auto; margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px; }
+.chatlog:empty::before { content: "Noch keine Nachrichten."; color: var(--muted); font-size: 14px; }
+.msg { font-size: 15px; overflow-wrap: anywhere; }
+.msg b { margin-right: 6px; }
+.msg.mine b { color: var(--field); }
+#chatIn { flex: 1; }
+
+/* Ende */
+.endinner { text-align: center; }
+.winner { font-size: 30px !important; line-height: 1.2; text-wrap: balance; }
